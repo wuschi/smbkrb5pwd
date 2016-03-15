@@ -473,9 +473,6 @@ static int smbkrb5pwd_exop_passwd(
 		/* if this fails, do not bother with samba,
 		   because passwords should be kept in sync */
 		rc_krb5 = krb5_set_passwd(op, qpw, e, pi);
-		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
-	     	     "smbkrb5pwd %s : krb5_set_passwd ret %d",
-	     	     op->o_log_prefix, rc_krb5);
 		if (rc_krb5 != LDAP_SUCCESS) {
 			rc = rc_krb5;
 			goto finish;
