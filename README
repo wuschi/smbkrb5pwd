@@ -88,6 +88,7 @@ olcSmbKrb5PwdEnable: krb5
 olcSmbKrb5PwdMustChange: 2592012
 olcSmbKrb5PwdKrb5Realm: EDU.EXAMPLE.ORG
 olcSmbKrb5PwdRequiredClass: posixAccount
+olcSmbKrb5PwdKeepSaslIdentity: TRUE
 
 
 The overlay accepts the following configuration attributes:
@@ -103,6 +104,10 @@ The overlay accepts the following configuration attributes:
 * olcSmbKrb5PwdRequiredClass - e.g. posixAccount
   - If set, the entry needs to have this object class for the kerberos 
     principal and samba passwords to be modified
+* olcSmbKrb5PwdKeepSaslIdentity - TRUE / FALSE
+  - If set to true and if the changed password contains a SASL identity
+    ({SASL}<id>@<KERBEROS_REALM>), then smbkrb5passwd tries to restore
+    this identity after the password change.
 
 
 KERBEROS PRINCIPAL

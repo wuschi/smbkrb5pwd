@@ -40,6 +40,10 @@
 
 #include "config.h"
 
+#include <lber.h>
+#include <lber_pvt.h>
+#include <lutil.h>
+
 #include <krb5/krb5.h>
 #include <kadm5/admin.h>
 
@@ -47,6 +51,7 @@
 
 static AttributeDescription *ad_objectclass;
 static AttributeDescription *ad_uid;
+static AttributeDescription *ad_userPassword;
 
 #ifdef HAVE_GNUTLS
 #include <gcrypt.h>
@@ -80,6 +85,7 @@ typedef struct smbkrb5pwd_t {
 	char    *admin_princstr;
 	ldap_pvt_thread_mutex_t krb5_mutex;
 	ObjectClass *oc_requiredObjectclass;
+	int     keep_sasl_id;
 } smbkrb5pwd_t;
 
 static const unsigned SMBKRB5PWD_F_ALL	=
@@ -461,12 +467,46 @@ static int smbkrb5pwd_exop_passwd(
 	}
 
 	if (SMBKRB5PWD_DO_KRB5(pi)) {
+		Attribute *a;
+		struct berval *keys;
+
 		/* if this fails, do not bother with samba,
 		   because passwords should be kept in sync */
 		rc_krb5 = krb5_set_passwd(op, qpw, e, pi);
+		Log2(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+	     	     "smbkrb5pwd %s : krb5_set_passwd ret %d",
+	     	     op->o_log_prefix, rc_krb5);
 		if (rc_krb5 != LDAP_SUCCESS) {
 			rc = rc_krb5;
 			goto finish;
+		}
+
+		if (pi->keep_sasl_id == 1) {
+			a = attr_find( e->e_attrs, ad_userPassword );
+			if (a) {
+				const char* SASL_SCHEME = "{sasl}";
+				const int SASL_SCHEME_LEN = 6;
+				if (a->a_vals[0].bv_len >= SASL_SCHEME_LEN && strncasecmp(a->a_vals[0].bv_val, SASL_SCHEME, SASL_SCHEME_LEN) == 0) {
+
+					ml = ch_malloc(sizeof(Modifications));
+					if (!qpw->rs_modtail) qpw->rs_modtail = &ml->sml_next;
+					ml->sml_next = qpw->rs_mods;
+					qpw->rs_mods = ml;
+
+					keys = ch_malloc( 2 * sizeof(struct berval) );
+					BER_BVZERO( &keys[1] );
+					ber_dupbv(keys, &a->a_vals[0]);
+
+					ml->sml_desc = ad_userPassword;
+					ml->sml_op = LDAP_MOD_REPLACE;
+#ifdef SLAP_MOD_INTERNAL
+					ml->sml_flags = SLAP_MOD_INTERNAL;
+#endif
+					ml->sml_numvals = 1;
+					ml->sml_values = keys;
+					ml->sml_nvalues = NULL;
+				}
+			}
 		}
 	}
 
@@ -478,6 +518,10 @@ static int smbkrb5pwd_exop_passwd(
 		char *c, *d;
 		struct berval pwd;
 		
+		Log1(LDAP_DEBUG_ANY, LDAP_LEVEL_NOTICE,
+	     	     "smbkrb5pwd %s : setting samba password",
+	     	     op->o_log_prefix);
+
 		/* Expand incoming UTF8 string to UCS4 */
 		l = ldap_utf8_chars(qpw->rs_new.bv_val);
 		wcs = ch_malloc((l+1) * sizeof(wchar_t));
@@ -597,6 +641,7 @@ enum {
 	PC_SMB_ENABLE,
 	PC_SMB_KRB5REALM,
 	PC_SMB_REQUIREDCLASS,
+	PC_SMB_KEEP_SASL_ID,
 };
 
 static ConfigDriver smbkrb5pwd_cf_func;
@@ -632,6 +677,11 @@ static ConfigTable smbkrb5pwd_cfats[] = {
 		"( OLcfgCtAt:1.5 NAME 'olcSmbKrb5PwdRequiredClass' "
 		"DESC 'Required objectClass' "
 		"SYNTAX OMsDirectoryString )", NULL, NULL },
+	{ "smbkrb5pwd-keep-sasl-identity", "on|off",
+		2, 2, 0, ARG_MAGIC|ARG_ON_OFF|PC_SMB_KEEP_SASL_ID, smbkrb5pwd_cf_func,
+		"( OLcfgCtAt:1.6 NAME 'olcSmbKrb5PwdKeepSaslIdentity' "
+		"DESC 'Keep the SASL id defined in userPassword if password is changed' "
+		"SYNTAX OMsBoolean SINGLE-VALUE )", NULL, NULL },
 
 	{ NULL, NULL, 0, 0, 0, ARG_IGNORED }
 };
@@ -647,6 +697,7 @@ static ConfigOCs smbkrb5pwd_cfocs[] = {
 			"$ olcSmbKrb5PwdCanChange "
 			"$ olcSmbKrb5PwdKrb5Realm "
 			"$ olcSmbKrb5PwdRequiredClass "
+			"$ olcSmbKrb5PwdKeepSaslIdentity "
 		") )", Cft_Overlay, smbkrb5pwd_cfats },
 
 	{ NULL, 0, NULL }
@@ -689,6 +740,9 @@ smbkrb5pwd_cf_func( ConfigArgs *c )
 				}
 			}
 			break;
+		case PC_SMB_KEEP_SASL_ID:
+			c->value_int = pi->keep_sasl_id;
+			break;
 
 		default:
 			assert( 0 );
@@ -714,6 +768,8 @@ smbkrb5pwd_cf_func( ConfigArgs *c )
 				m = verb_to_mask( c->line, smbkrb5pwd_modules );
 				pi->mode &= ~m;
 			}
+			break;
+		case PC_SMB_KEEP_SASL_ID:
 			break;
 
 		default:
@@ -800,6 +856,13 @@ smbkrb5pwd_cf_func( ConfigArgs *c )
 		}
 		break;
 	}
+	case PC_SMB_KEEP_SASL_ID: {
+		if (c->value_int)
+			pi->keep_sasl_id = 1;
+		else
+			pi->keep_sasl_id = 0;
+		break;
+	}
 	default:
 		assert( 0 );
 		return 1;
@@ -816,6 +879,7 @@ smbkrb5pwd_modules_init( smbkrb5pwd_t *pi )
 	}
         krb5_ad[] = {
 		{ "uid",			&ad_uid },
+		{ "userPassword",		&ad_userPassword },
 		{ NULL }
 	},
 	samba_ad[] = {
@@ -942,7 +1006,7 @@ smbkrb5pwd_initialize(void)
 	smbkrb5pwd.on_bi.bi_db_destroy = smbkrb5pwd_db_destroy;
 
 	smbkrb5pwd.on_bi.bi_extended = smbkrb5pwd_exop_passwd;
-    
+
 	smbkrb5pwd.on_bi.bi_cf_ocs = smbkrb5pwd_cfocs;
 
 	rc = config_register_schema( smbkrb5pwd_cfats, smbkrb5pwd_cfocs );
